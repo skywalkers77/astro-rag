@@ -12,5 +12,11 @@
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.42.0"
+	},
+	"dependencies": {
+		"@langchain/community": "^0.3.57",
+		"@langchain/core": "^0.3.78",
+		"hono": "^4.9.9",
+		"langchain": "^0.3.35"
 	}
 }

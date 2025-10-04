@@ -9,7 +9,35 @@
 	"compatibility_date": "2025-10-04",
 	"observability": {
 		"enabled": true
-	}
+	},
+	"ai": {
+		"binding": "AI",
+		"remote": true
+	},
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "vector-index",
+			"remote": true
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "database",
+			"database_name": "database",
+			"database_id": "8a049eb2-1cdc-4143-a8e5-775c84bb269a",
+			"remote": true
+		}
+	],
+	
+  "workflows": [
+    {
+      "name": "rag",
+      "binding": "RAG_WORKFLOW",
+      "class_name": "RAGWorkflow"
+    }
+  ],
+
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
