@@ -16,6 +16,7 @@
 	"dependencies": {
 		"@langchain/community": "^0.3.57",
 		"@langchain/core": "^0.3.78",
+		"@langchain/google-genai": "^0.1.0",
 		"hono": "^4.9.9",
 		"langchain": "^0.3.35"
 	}
