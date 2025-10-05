@@ -37,11 +37,77 @@ app.post("/ingest", async (c) => {
 	});
 	
 	const message = pdfUrl ? `Created PDF note: ${filename}` : "Created note";
-	return c.text(message, 201);
+  return c.text(message, 201);
   });
+
+// Endpoint to get chunking information and statistics
+app.get("/chunks", async (c) => {
+  try {
+    const filename = c.req.query("filename");
+    let query = "SELECT filename, COUNT(*) as chunk_count, AVG(chunk_size) as avg_chunk_size, MIN(chunk_index) as min_chunk, MAX(chunk_index) as max_chunk FROM pdfs";
+    let params = [];
+    
+    if (filename) {
+      query += " WHERE filename = ?";
+      params.push(filename);
+    }
+    
+    query += " GROUP BY filename ORDER BY filename";
+    
+    const { results } = await c.env.database.prepare(query).bind(...params).run();
+    
+    if (!results || results.length === 0) {
+      return c.json({ message: "No chunks found", chunks: [] });
+    }
+    
+    return c.json({
+      message: "Chunk statistics retrieved successfully",
+      total_files: results.length,
+      chunks: results
+    });
+  } catch (error) {
+    console.error("Error retrieving chunk statistics:", error);
+    return c.text(`Error retrieving chunk statistics: ${error.message}`, 500);
+  }
+});
+
+// Endpoint to get specific chunks for a document
+app.get("/chunks/:filename", async (c) => {
+  try {
+    const filename = c.req.param("filename");
+    const chunkIndex = c.req.query("chunkIndex");
+    
+    let query = "SELECT * FROM pdfs WHERE filename = ?";
+    let params = [filename];
+    
+    if (chunkIndex !== undefined) {
+      query += " AND chunk_index = ?";
+      params.push(parseInt(chunkIndex));
+    }
+    
+    query += " ORDER BY chunk_index ASC";
+    
+    const { results } = await c.env.database.prepare(query).bind(...params).run();
+    
+    if (!results || results.length === 0) {
+      return c.json({ message: `No chunks found for filename: ${filename}`, chunks: [] });
+    }
+    
+    return c.json({
+      message: `Retrieved chunks for ${filename}`,
+      filename: filename,
+      total_chunks: results.length,
+      chunks: results
+    });
+  } catch (error) {
+    console.error("Error retrieving chunks:", error);
+    return c.text(`Error retrieving chunks: ${error.message}`, 500);
+  }
+});
 
 app.get("/", async (c) => {
   const question = c.req.query("text") || "What is the square root of 9?";
+  const topK = parseInt(c.req.query("topK")) || 5; // Default to 5 chunks for better context
 
   const embeddings = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", {
     text: question,
@@ -49,36 +115,56 @@ app.get("/", async (c) => {
   
   const vectors = embeddings.data[0];
 
-  const vectorQuery = await c.env.VECTORIZE.query(vectors, { topK: 1 });
-  let vecId;
-  if (
-    vectorQuery.matches &&
-    vectorQuery.matches.length > 0 &&
-    vectorQuery.matches[0]
-  ) {
-    vecId = vectorQuery.matches[0].id;
+  const vectorQuery = await c.env.VECTORIZE.query(vectors, { topK });
+  let matchingChunks = [];
+  
+  if (vectorQuery.matches && vectorQuery.matches.length > 0) {
+    // Get all matching chunk IDs
+    const chunkIds = vectorQuery.matches.map(match => match.id);
+    
+    // Fetch all matching chunks from database
+    const placeholders = chunkIds.map(() => '?').join(',');
+    const query = `SELECT * FROM pdfs WHERE id IN (${placeholders}) ORDER BY chunk_index ASC`;
+    const { results } = await c.env.database.prepare(query).bind(...chunkIds).run();
+    
+    if (results) {
+      matchingChunks = results;
+      console.log(`Retrieved ${matchingChunks.length} matching chunks`);
+    }
   } else {
-    console.log("No matching vector found or vectorQuery.matches is empty");
+    console.log("No matching vectors found");
   }
 
-  let notes = [];
-  if (vecId) {
-    const query = `SELECT * FROM pdfs WHERE id = ?`;
-    const { results } = await c.env.database.prepare(query).bind(vecId).run();
-    if (results) notes = results.map((vec) => vec.text);
+  // Group chunks by filename for better context organization
+  const chunksByFile = {};
+  matchingChunks.forEach(chunk => {
+    const filename = chunk.filename || 'Unknown';
+    if (!chunksByFile[filename]) {
+      chunksByFile[filename] = [];
+    }
+    chunksByFile[filename].push(chunk);
+  });
+
+  // Build context message with chunk information
+  let contextMessage = "";
+  if (Object.keys(chunksByFile).length > 0) {
+    contextMessage = "Context from relevant document chunks:\n\n";
+    
+    Object.entries(chunksByFile).forEach(([filename, chunks]) => {
+      contextMessage += `Document: ${filename}\n`;
+      chunks.forEach((chunk, index) => {
+        contextMessage += `Chunk ${chunk.chunk_index + 1}/${chunk.total_chunks}: ${chunk.text}\n\n`;
+      });
+    });
   }
 
-  const contextMessage = notes.length
-    ? `Context:\n${notes.map((note) => `- ${note}`).join("\n")}`
-    : "";
-
-  const systemPrompt = `When answering the question or responding, use the context provided, if it is provided and relevant.`;
+  const systemPrompt = `When answering the question, use the context provided from the document chunks if it is relevant and helpful. If the context doesn't contain relevant information, you can still answer based on your general knowledge. Be specific about which document or chunk you're referencing when using the provided context.`;
 
   const { response: answer } = await c.env.AI.run(
     "@cf/meta/llama-3-8b-instruct",
     {
       messages: [
-        ...(notes.length ? [{ role: "system", content: contextMessage }] : []),
+        ...(contextMessage ? [{ role: "system", content: contextMessage }] : []),
         { role: "system", content: systemPrompt },
         { role: "user", content: question },
       ],
@@ -97,6 +183,67 @@ export default app;
 
 
 export class RAGWorkflow extends WorkflowEntrypoint {
+  // Text chunking utility functions
+  chunkText(text, chunkSize = 1000, overlap = 200) {
+    if (!text || text.length <= chunkSize) {
+      return [text];
+    }
+
+    const chunks = [];
+    let start = 0;
+    
+    while (start < text.length) {
+      let end = start + chunkSize;
+      
+      // If this isn't the last chunk, try to break at a sentence or word boundary
+      if (end < text.length) {
+        // Look for sentence endings within the last 100 characters
+        const sentenceEnd = text.lastIndexOf('.', end);
+        const questionEnd = text.lastIndexOf('?', end);
+        const exclamationEnd = text.lastIndexOf('!', end);
+        
+        const lastSentenceEnd = Math.max(sentenceEnd, questionEnd, exclamationEnd);
+        
+        if (lastSentenceEnd > start + chunkSize * 0.7) {
+          end = lastSentenceEnd + 1;
+        } else {
+          // Look for word boundaries
+          const lastSpace = text.lastIndexOf(' ', end);
+          if (lastSpace > start + chunkSize * 0.8) {
+            end = lastSpace;
+          }
+        }
+      }
+      
+      const chunk = text.slice(start, end).trim();
+      if (chunk.length > 0) {
+        chunks.push(chunk);
+      }
+      
+      // Move start position with overlap
+      start = end - overlap;
+      if (start >= text.length) break;
+    }
+    
+    return chunks;
+  }
+
+  // Enhanced chunking with metadata preservation
+  chunkTextWithMetadata(text, filename, chunkSize = 1000, overlap = 200) {
+    const chunks = this.chunkText(text, chunkSize, overlap);
+    
+    return chunks.map((chunk, index) => ({
+      text: chunk,
+      metadata: {
+        filename,
+        chunkIndex: index,
+        totalChunks: chunks.length,
+        chunkSize: chunk.length,
+        originalTextLength: text.length
+      }
+    }));
+  }
+
   // Helper method to get actual PDF URL from NCBI viewer URLs
   async getActualPdfUrl(viewerUrl) {
     try {
@@ -405,56 +552,104 @@ ${extractedText}`;
       return text;
     });
 
-    const record = await step.do(`create database record`, async () => {
+    // Chunk the extracted text with larger chunks to reduce API calls
+    const chunks = await step.do(`chunk text`, async () => {
+      const filenameToStore = filename || 'untitled';
+      const chunkedData = this.chunkTextWithMetadata(extractedText, filenameToStore, 8000, 500);
+      console.log(`Text chunked into ${chunkedData.length} chunks (8k chunks to minimize API calls)`);
+      return chunkedData;
+    });
+
+    // Create database records for each chunk
+    const records = await step.do(`create database records for chunks`, async () => {
       try {
-        const query = "INSERT INTO pdfs (text, filename, pdf_url) VALUES (?, ?, ?) RETURNING *";
-        const filenameToStore = filename || null;
+        const records = [];
         const pdfUrlToStore = pdfUrl || null;
 
-        console.log("Inserting into database:", { extractedText: extractedText?.substring(0, 100), filenameToStore, pdfUrlToStore });
+        for (const chunkData of chunks) {
+          const query = "INSERT INTO pdfs (text, filename, pdf_url, chunk_index, total_chunks, chunk_size, original_text_length) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *";
+          
+          console.log("Inserting chunk into database:", { 
+            chunkText: chunkData.text?.substring(0, 100), 
+            filename: chunkData.metadata.filename,
+            chunkIndex: chunkData.metadata.chunkIndex,
+            totalChunks: chunkData.metadata.totalChunks
+          });
 
-        const { results } = await env.database.prepare(query).bind(extractedText, filenameToStore, pdfUrlToStore).run();
+          const { results } = await env.database.prepare(query).bind(
+            chunkData.text,
+            chunkData.metadata.filename,
+            pdfUrlToStore,
+            chunkData.metadata.chunkIndex,
+            chunkData.metadata.totalChunks,
+            chunkData.metadata.chunkSize,
+            chunkData.metadata.originalTextLength
+          ).run();
 
-        const record = results[0];
-        if (!record) throw new Error("Failed to create note - no record returned");
+          const record = results[0];
+          if (!record) throw new Error("Failed to create chunk record - no record returned");
+          
+          records.push(record);
+        }
         
-        console.log("Database record created:", record);
-        return record;
+        console.log(`Created ${records.length} database records for chunks`);
+        return records;
       } catch (error) {
         console.error("Database insertion error:", error);
         throw error;
       }
     });
 
-    const embedding = await step.do(`generate embedding`, async () => {
+    // Generate embeddings for each chunk
+    const embeddings = await step.do(`generate embeddings for chunks`, async () => {
       try {
-        console.log("Generating embeddings for text:", extractedText?.substring(0, 100));
+        console.log(`Generating embeddings for ${chunks.length} chunks`);
         
         // Use LangChain with Gemini embeddings for ingestion
-        const embeddings = new GoogleGenerativeAIEmbeddings({
+        const embeddingModel = new GoogleGenerativeAIEmbeddings({
           model: "text-embedding-004", // Latest and best Gemini embedding model
-          apiKey: env.GOOGLE_API_KEY,
         });
 
-        // Generate embeddings for the extracted text
-        const values = await embeddings.embedQuery(extractedText);
-        if (!values) throw new Error("Failed to generate vector embedding");
+        const chunkEmbeddings = [];
         
-        console.log("Embeddings generated successfully, dimensions:", values.length);
-        return values;
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          console.log(`Generating embedding for chunk ${i + 1}/${chunks.length}:`, chunk.text?.substring(0, 100));
+          
+          // Generate embeddings for each chunk
+          const values = await embeddingModel.embedQuery(chunk.text);
+          if (!values) throw new Error(`Failed to generate vector embedding for chunk ${i + 1}`);
+          
+          chunkEmbeddings.push({
+            id: records[i].id.toString(),
+            values: values,
+            chunkIndex: chunk.metadata.chunkIndex,
+            filename: chunk.metadata.filename
+          });
+        }
+        
+        console.log(`Embeddings generated successfully for ${chunkEmbeddings.length} chunks, dimensions:`, chunkEmbeddings[0]?.values.length);
+        return chunkEmbeddings;
       } catch (error) {
         console.error("Embedding generation error:", error);
         throw error;
       }
     });
 
-    await step.do(`insert vector`, async () => {
-      return env.VECTORIZE.upsert([
-        {
-          id: record.id.toString(),
-          values: embedding,
-        },
-      ]);
+    // Insert vectors for all chunks
+    await step.do(`insert vectors for all chunks`, async () => {
+      try {
+        const vectorData = embeddings.map(embedding => ({
+          id: embedding.id,
+          values: embedding.values,
+        }));
+        
+        console.log(`Inserting ${vectorData.length} vectors into Vectorize`);
+        return await env.VECTORIZE.upsert(vectorData);
+      } catch (error) {
+        console.error("Vector insertion error:", error);
+        throw error;
+      }
     });
   }
 }

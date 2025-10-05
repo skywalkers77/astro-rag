@@ -54,7 +54,7 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
 	"vars": {
-		"GOOGLE_API_KEY": "AIzaSyDM_9VdhauXGqY1IPSR41w3Ykk8"
+		"GOOGLE_API_KEY": "YOURGOOGLEAPIKEY"
 	}
 	/**
 	 * Note: Use secrets to store sensitive data.
