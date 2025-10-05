@@ -17,7 +17,7 @@ import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 const app = new Hono();
 
 app.post("/ingest", async (c) => {
-	const { text, filename, pdfUrl } = await c.req.json();
+	const { text, filename, pdfUrl, paperTitle } = await c.req.json();
 	
 	// Support both text and PDF ingestion
 	if (!text && !pdfUrl) {
@@ -28,6 +28,65 @@ app.post("/ingest", async (c) => {
 		return c.text("Missing filename for PDF", 400);
 	}
 	
+	// For PDF processing, forward to EC2 API
+	if (pdfUrl) {
+		try {
+			const ec2Response = await fetch(`${c.env.EC2_API_URL}/api/process-pdf`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					pdf_url: pdfUrl,
+					paper_title: paperTitle || filename,
+					options: {
+						extract_images: true,
+						extract_tables: true,
+						chunk_size: 1000,
+						chunk_overlap: 200
+					}
+				})
+			});
+			
+			if (!ec2Response.ok) {
+				throw new Error(`EC2 API error: ${ec2Response.status}`);
+			}
+			
+			const ec2Data = await ec2Response.json();
+			
+			// Process the chunks and embeddings from EC2
+			await c.env.RAG_WORKFLOW.create({ 
+				params: { 
+					chunks: ec2Data.chunks,
+					embeddings: ec2Data.embeddings,
+					filename,
+					pdfUrl,
+					summary: ec2Data.summary
+				} 
+			});
+			
+			return c.json({
+				message: `Processed PDF: ${filename}`,
+				document_id: ec2Data.document_id,
+				chunks_count: ec2Data.chunks.length,
+				processing_time: ec2Data.processing_time
+			}, 201);
+			
+		} catch (error) {
+			console.error("EC2 API processing failed:", error);
+			// Fallback to local processing
+			await c.env.RAG_WORKFLOW.create({ 
+				params: { 
+					text, 
+					filename, 
+					pdfUrl 
+				} 
+			});
+			return c.text(`Created PDF note (fallback): ${filename}`, 201);
+		}
+	}
+	
+	// For text-only ingestion, use existing workflow
 	await c.env.RAG_WORKFLOW.create({ 
 		params: { 
 			text, 
@@ -347,12 +406,30 @@ ${extractedText}`;
 
   async run(event, step) {
     const env = this.env;
-    const { text, filename, pdfUrl } = event.payload;
+    const { text, filename, pdfUrl, chunks, embeddings, summary } = event.payload;
     
-    console.log("RAGWorkflow started with payload:", { text: text?.substring(0, 100), filename, pdfUrl });
+    console.log("RAGWorkflow started with payload:", { 
+      text: text?.substring(0, 100), 
+      filename, 
+      pdfUrl, 
+      hasChunks: !!chunks,
+      hasEmbeddings: !!embeddings,
+      hasSummary: !!summary
+    });
 
-    // Extract text from PDF if pdfUrl is provided
-    const extractedText = await step.do(`extract text from PDF`, async () => {
+    // Handle EC2-processed data or fallback to local processing
+    const processedData = await step.do(`process data`, async () => {
+      // If we have chunks from EC2, use them directly
+      if (chunks && embeddings) {
+        console.log(`Using EC2-processed data: ${chunks.length} chunks`);
+        return {
+          chunks: chunks,
+          embeddings: embeddings,
+          summary: summary
+        };
+      }
+      
+      // Fallback to local PDF processing
       if (pdfUrl) {
         try {
           // Fetch the PDF from the URL
@@ -385,50 +462,96 @@ ${extractedText}`;
               if (actualResponse.ok) {
                 const actualPdfBuffer = await actualResponse.arrayBuffer();
                 const pdfText = await this.extractTextWithCloudflareAI(actualPdfBuffer, filename, env);
-                return pdfText;
+                return {
+                  chunks: [{ id: '1', text: pdfText, type: 'text', page_number: 1 }],
+                  embeddings: null, // Will be generated later
+                  summary: null
+                };
               }
             }
             
             // If we can't get the actual PDF, extract text from the HTML content
-            return await this.extractTextFromHtmlContent(pdfBuffer, filename);
+            const htmlText = await this.extractTextFromHtmlContent(pdfBuffer, filename);
+            return {
+              chunks: [{ id: '1', text: htmlText, type: 'text', page_number: 1 }],
+              embeddings: null,
+              summary: null
+            };
           }
           
           // Use Cloudflare AI toMarkdown for proper PDF text extraction
           const pdfText = await this.extractTextWithCloudflareAI(pdfBuffer, filename, env);
-          return pdfText;
+          return {
+            chunks: [{ id: '1', text: pdfText, type: 'text', page_number: 1 }],
+            embeddings: null,
+            summary: null
+          };
           
         } catch (error) {
           console.error("Error processing PDF:", error);
           throw new Error(`Failed to process PDF: ${error.message}`);
         }
       }
-      return text;
+      
+      // For text-only input
+      return {
+        chunks: [{ id: '1', text: text, type: 'text', page_number: 1 }],
+        embeddings: null,
+        summary: null
+      };
     });
 
-    const record = await step.do(`create database record`, async () => {
+    // Process each chunk and store in database
+    const records = await step.do(`create database records`, async () => {
       try {
-        const query = "INSERT INTO pdfs (text, filename, pdf_url) VALUES (?, ?, ?) RETURNING *";
-        const filenameToStore = filename || null;
-        const pdfUrlToStore = pdfUrl || null;
-
-        console.log("Inserting into database:", { extractedText: extractedText?.substring(0, 100), filenameToStore, pdfUrlToStore });
-
-        const { results } = await env.database.prepare(query).bind(extractedText, filenameToStore, pdfUrlToStore).run();
-
-        const record = results[0];
-        if (!record) throw new Error("Failed to create note - no record returned");
+        const records = [];
         
-        console.log("Database record created:", record);
-        return record;
+        for (const chunk of processedData.chunks) {
+          const query = "INSERT INTO pdfs (text, filename, pdf_url, chunk_id, chunk_type, page_number, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *";
+          const filenameToStore = filename || null;
+          const pdfUrlToStore = pdfUrl || null;
+          const metadata = JSON.stringify(chunk.metadata || {});
+
+          console.log("Inserting chunk into database:", { 
+            chunkId: chunk.id, 
+            textLength: chunk.text?.length, 
+            type: chunk.type,
+            pageNumber: chunk.page_number
+          });
+
+          const { results } = await env.database.prepare(query).bind(
+            chunk.text, 
+            filenameToStore, 
+            pdfUrlToStore,
+            chunk.id,
+            chunk.type,
+            chunk.page_number,
+            metadata
+          ).run();
+
+          const record = results[0];
+          if (!record) throw new Error(`Failed to create record for chunk ${chunk.id}`);
+          
+          records.push(record);
+        }
+        
+        console.log(`Created ${records.length} database records`);
+        return records;
       } catch (error) {
         console.error("Database insertion error:", error);
         throw error;
       }
     });
 
-    const embedding = await step.do(`generate embedding`, async () => {
+    // Generate embeddings for chunks that don't have them
+    const finalEmbeddings = await step.do(`generate embeddings`, async () => {
       try {
-        console.log("Generating embeddings for text:", extractedText?.substring(0, 100));
+        if (processedData.embeddings) {
+          console.log("Using pre-generated embeddings from EC2");
+          return processedData.embeddings;
+        }
+        
+        console.log("Generating embeddings for chunks");
         
         // Use LangChain with Gemini embeddings for ingestion
         const embeddings = new GoogleGenerativeAIEmbeddings({
@@ -436,25 +559,30 @@ ${extractedText}`;
           apiKey: env.GOOGLE_API_KEY,
         });
 
-        // Generate embeddings for the extracted text
-        const values = await embeddings.embedQuery(extractedText);
-        if (!values) throw new Error("Failed to generate vector embedding");
+        const chunkEmbeddings = [];
+        for (const chunk of processedData.chunks) {
+          const values = await embeddings.embedQuery(chunk.text);
+          if (!values) throw new Error(`Failed to generate vector embedding for chunk ${chunk.id}`);
+          chunkEmbeddings.push(values);
+        }
         
-        console.log("Embeddings generated successfully, dimensions:", values.length);
-        return values;
+        console.log(`Generated ${chunkEmbeddings.length} embeddings, dimensions:`, chunkEmbeddings[0]?.length);
+        return chunkEmbeddings;
       } catch (error) {
         console.error("Embedding generation error:", error);
         throw error;
       }
     });
 
-    await step.do(`insert vector`, async () => {
-      return env.VECTORIZE.upsert([
-        {
-          id: record.id.toString(),
-          values: embedding,
-        },
-      ]);
+    // Insert vectors for each chunk
+    await step.do(`insert vectors`, async () => {
+      const vectorData = records.map((record, index) => ({
+        id: record.id.toString(),
+        values: finalEmbeddings[index],
+      }));
+      
+      console.log(`Inserting ${vectorData.length} vectors into Vectorize`);
+      return env.VECTORIZE.upsert(vectorData);
     });
   }
 }

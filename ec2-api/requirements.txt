@@ -1,0 +1,33 @@
+# Core dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# Google AI
+google-generativeai==0.3.2
+
+# PDF processing
+PyMuPDF==1.23.8
+pdfplumber==0.10.3
+
+# Image processing
+Pillow==10.1.0
+opencv-python==4.8.1.78
+
+# Data processing
+pandas==2.1.4
+numpy==1.25.2
+
+# HTTP client
+aiohttp==3.9.1
+
+# Caching (optional - remove if not needed)
+# redis==5.0.1
+
+# Vector search (optional)
+chromadb==0.4.18
+faiss-cpu==1.7.4
+
+# Utilities
+python-multipart==0.0.6
+python-dotenv==1.0.0
