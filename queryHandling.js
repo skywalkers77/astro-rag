@@ -10,9 +10,10 @@ const CONFIG = {
     CF_INDEX_NAME: "my-index", // Replace with your actual index name
     EMBEDDING_MODEL: "text-embedding-004",
     GEMINI_MODEL: "gemini-2.0-flash-exp",
-    DEFAULT_TOP_K: 8,
-    DEFAULT_SCORE_THRESHOLD: 0.72,
-    MAX_CONTEXT_CHARS: 1500
+    DEFAULT_TOP_K: 10,
+    DEFAULT_SCORE_THRESHOLD: 0.5,
+    MAX_CONTEXT_CHARS: 3000,
+    MAX_OUTPUT_TOKENS: 4096 // Increased for longer responses
 };
 
 // -------------------------
@@ -21,16 +22,34 @@ const CONFIG = {
 const SYSTEM_PROMPT_DB_ONLY = `
 You are an assistant that MUST ONLY use the provided documents below to answer the user's question.
 Do NOT use any external knowledge beyond these documents. If the documents do NOT contain enough
-information to answer the question, reply exactly: "NOT_IN_DB". Provide a short justification
-(one sentence) referencing which documents you used, and include the doc ids used.
+information to answer the question, reply that there is no relevant data in the dataset.
+
+When answering, provide comprehensive and detailed responses. Include:
+- Detailed explanations with context
+- Specific examples from the documents
+- Relevant details and nuances
+- Clear reasoning and analysis
+- References to specific document IDs used
+
+Aim for thorough, informative responses that fully address the user's question.
 `;
 
 const SYSTEM_PROMPT_HYBRID = `
 You are an assistant that SHOULD PRIORITIZE the provided vector_db tool when answering.
-You MAY use external knowledge and the google_search to help if the vector_db doesn't fully answer the question,
-- Rephrase the user's query if needed before calling google_search, but give priority to the vector_db results. 
-- When using vector_db content, you MUST cite the doc id(s).
-- If the vector_db is sufficient, do not add external facts unless they are directly relevant.
+You MAY use external knowledge and the google_search to help if the vector_db doesn't fully answer the question.
+
+When answering, provide comprehensive and detailed responses. Include:
+- Detailed explanations with context
+- Specific examples from the documents
+- Relevant details and nuances
+- Clear reasoning and analysis
+- References to specific document IDs used
+
+Guidelines:
+- Rephrase the user's query if needed before calling google_search, but give priority to the vector_db results
+- When using vector_db content, you MUST cite the doc source and doc id(s)
+- If the vector_db is sufficient, do not add external facts unless they are directly relevant
+- Aim for thorough, informative responses that fully address the user's question
 `;
 
 // -------------------------
@@ -157,7 +176,7 @@ function buildContextSnippet(matches, includeLimitChars = CONFIG.MAX_CONTEXT_CHA
 /**
  * Call Gemini API with context
  */
-async function callGeminiWithContext(systemPrompt, userQuery, context, env, temperature = 0.0, maxOutputTokens = 512) {
+async function callGeminiWithContext(systemPrompt, userQuery, context, env, temperature = 0.0, maxOutputTokens = CONFIG.MAX_OUTPUT_TOKENS) {
     try {
         const prompt = `${systemPrompt}\n\nCONTEXT:\n${context}\n\nUSER QUERY:\n${userQuery}\n\nAnswer:`;
 

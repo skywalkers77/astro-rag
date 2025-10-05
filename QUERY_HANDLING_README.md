@@ -112,7 +112,7 @@ const CONFIG = {
   GEMINI_MODEL: "gemini-2.0-flash-exp", // Gemini LLM model
   DEFAULT_TOP_K: 8, // Default number of documents to retrieve
   DEFAULT_SCORE_THRESHOLD: 0.72, // Default similarity threshold
-  MAX_CONTEXT_CHARS: 1500 // Max characters per document in context
+  MAX_CONTEXT_CHARS: 3000 // Max characters per document in context
 };
 ```
 
