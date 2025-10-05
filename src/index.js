@@ -10,12 +10,22 @@
  */
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { answerQuery } from "../queryHandling.js";
 
 
 const app = new Hono();
+
+// Enable CORS for all routes
+app.use("*", cors({
+	origin: "*",
+	allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+	allowHeaders: ["*"],
+	exposeHeaders: ["*"],
+	maxAge: 86400
+}));
 
 app.post("/ingest", async (c) => {
   const { text, filename, pdfUrl } = await c.req.json();
@@ -103,6 +113,44 @@ app.get("/chunks/:filename", async (c) => {
   } catch (error) {
     console.error("Error retrieving chunks:", error);
     return c.text(`Error retrieving chunks: ${error.message}`, 500);
+  }
+});
+
+// Endpoint to get extracted tables (as dataframes)
+app.get("/tables", async (c) => {
+  try {
+    const filename = c.req.query("filename");
+    let query = "SELECT id, filename, table_index, table_markdown, dataframe_json FROM pdf_tables";
+    const params = [];
+    if (filename) {
+      query += " WHERE filename = ?";
+      params.push(filename);
+    }
+    query += " ORDER BY filename, table_index";
+    const { results } = await c.env.database.prepare(query).bind(...params).run();
+    return c.json({ tables: results || [] });
+  } catch (error) {
+    console.error("Error retrieving tables:", error);
+    return c.text(`Error retrieving tables: ${error.message}`, 500);
+  }
+});
+
+// Endpoint to get extracted image/graph descriptions
+app.get("/images", async (c) => {
+  try {
+    const filename = c.req.query("filename");
+    let query = "SELECT id, filename, image_index, alt_text, caption_text, description FROM pdf_images";
+    const params = [];
+    if (filename) {
+      query += " WHERE filename = ?";
+      params.push(filename);
+    }
+    query += " ORDER BY filename, image_index";
+    const { results } = await c.env.database.prepare(query).bind(...params).run();
+    return c.json({ images: results || [] });
+  } catch (error) {
+    console.error("Error retrieving images:", error);
+    return c.text(`Error retrieving images: ${error.message}`, 500);
   }
 });
 
@@ -465,6 +513,85 @@ ${extractedText}`;
     }
   }
 
+  // Ensure auxiliary tables exist
+  async ensureAuxTables(env) {
+    try {
+      await env.database.exec(
+        "CREATE TABLE IF NOT EXISTS pdf_tables (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, table_index INTEGER, table_markdown TEXT, dataframe_json TEXT)"
+      );
+      await env.database.exec(
+        "CREATE TABLE IF NOT EXISTS pdf_images (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, image_index INTEGER, alt_text TEXT, caption_text TEXT, description TEXT)"
+      );
+    } catch (e) {
+      console.log("ensureAuxTables error (non-fatal if already created):", e.message);
+    }
+  }
+
+  // Call Gemini 1.5 Flash
+  async callGeminiFlash(env, contents) {
+    const apiKey = env.GOOGLE_API_KEY;
+    if (!apiKey) throw new Error("Missing GOOGLE_API_KEY env var");
+    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
+    const body = {
+      contents: [
+        {
+          role: "user",
+          parts: contents.map((text) => ({ text }))
+        }
+      ]
+    };
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Gemini error ${res.status}: ${t}`);
+    }
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return text;
+  }
+
+  // Extract markdown tables from text
+  extractMarkdownTables(markdown) {
+    const tables = [];
+    const lines = markdown.split(/\n/);
+    let i = 0;
+    while (i < lines.length) {
+      // Look for header row with pipes and a separator line like |---|
+      if (/(^|\s)\|.*\|\s*$/.test(lines[i]) && i + 1 < lines.length && /\|?\s*:?-{3,}\s*(\|\s*:?-{3,}\s*)+\|?/.test(lines[i + 1])) {
+        const start = i;
+        i += 2;
+        while (i < lines.length && /(^|\s)\|.*\|\s*$/.test(lines[i])) i++;
+        const end = i;
+        const snippet = lines.slice(start, end).join("\n");
+        tables.push(snippet);
+        continue;
+      }
+      i++;
+    }
+    return tables;
+  }
+
+  // Extract image references and captions from markdown
+  extractImageCaptions(markdown) {
+    const images = [];
+    const imageRegex = /!\[(.*?)\]\((.*?)\)/g; // alt and url if present
+    let match;
+    while ((match = imageRegex.exec(markdown)) !== null) {
+      images.push({ alt: match[1] || "", url: match[2] || "" });
+    }
+    // Also capture figure captions like "Figure 1:" or "Fig. 2 -"
+    const figureRegex = /(?:^|\n)\s*(Figure\s*\d+[:.-]?\s+[^\n]+|Fig\.\s*\d+[:.-]?\s+[^\n]+)/gi;
+    let cap;
+    while ((cap = figureRegex.exec(markdown)) !== null) {
+      images.push({ alt: "", url: "", caption: cap[1].trim() });
+    }
+    return images;
+  }
+
   async run(event, step) {
     const env = this.env;
     const { text, filename, pdfUrl } = event.payload;
@@ -525,6 +652,56 @@ ${extractedText}`;
       return text;
     });
 
+    // Create aux tables if needed (best-effort)
+    await step.do("ensure aux tables", async () => {
+      await this.ensureAuxTables(env);
+    });
+
+    // Use Gemini 1.5 Flash to extract tables as dataframes and image/graph descriptions
+    await step.do("extract tables and images with Gemini", async () => {
+      try {
+        const fname = filename || "untitled";
+        // Tables
+        const tableSnippets = this.extractMarkdownTables(extractedText || "");
+        for (let t = 0; t < tableSnippets.length; t++) {
+          const tableMd = tableSnippets[t];
+          const prompt = [
+            "You are a precise data extraction engine.",
+            "Convert the following Markdown table to a compact JSON array of row objects.",
+            "Return ONLY valid JSON. Do not include explanations.",
+            tableMd
+          ];
+          const jsonText = await this.callGeminiFlash(env, prompt);
+          // Insert into D1
+          await env.database
+            .prepare("INSERT INTO pdf_tables (filename, table_index, table_markdown, dataframe_json) VALUES (?, ?, ?, ?)")
+            .bind(fname, t, tableMd, jsonText)
+            .run();
+        }
+
+        // Images and graphs
+        const images = this.extractImageCaptions(extractedText || "");
+        for (let i = 0; i < images.length; i++) {
+          const { alt = "", caption = "", url = "" } = images[i];
+          const prompt = [
+            "You are an expert visual describer.",
+            "Given the available alt text and/or caption from a document, generate a concise, informative description of the image/graph.",
+            "Do not hallucinate specifics that are not implied by the text. If information is insufficient, say so succinctly.",
+            `Alt: ${alt || "(none)"}`,
+            `Caption: ${caption || "(none)"}`
+          ];
+          const description = await this.callGeminiFlash(env, prompt);
+          await env.database
+            .prepare("INSERT INTO pdf_images (filename, image_index, alt_text, caption_text, description) VALUES (?, ?, ?, ?, ?)")
+            .bind(fname, i, alt || null, caption || null, description || null)
+            .run();
+        }
+      } catch (e) {
+        console.error("Gemini extraction step failed:", e);
+        // Non-fatal to the overall pipeline
+      }
+    });
+
     // Chunk the extracted text with larger chunks to reduce API calls
     const chunks = await step.do(`chunk text`, async () => {
       const filenameToStore = filename || 'untitled';
@@ -581,6 +758,7 @@ ${extractedText}`;
         // Use LangChain with Gemini embeddings for ingestion
         const embeddingModel = new GoogleGenerativeAIEmbeddings({
           model: "text-embedding-004", // Latest and best Gemini embedding model
+          apiKey: env.GOOGLE_API_KEY,
         });
 
         const chunkEmbeddings = [];
