@@ -29,15 +29,13 @@
 			"remote": true
 		}
 	],
-	
-  "workflows": [
-    {
-      "name": "rag",
-      "binding": "RAG_WORKFLOW",
-      "class_name": "RAGWorkflow"
-    }
-  ],
-
+	"workflows": [
+		{
+			"name": "rag",
+			"binding": "RAG_WORKFLOW",
+			"class_name": "RAGWorkflow"
+		}
+	],
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -54,7 +52,10 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
 	"vars": {
-		"GOOGLE_API_KEY": "YOURGOOGLEAPIKEY"
+		"GOOGLE_API_KEY": "AIzaSyDM_9VdhauXGqY1IPSR41w3Ykk8-zTqEnM",
+		"GEMINI_API_KEY": "AIzaSyCZaDvrxxQKrUV1Rme2uAW92s4tWqWoZxk",
+		"GOOGLE_CSE_ID": "f566c18b235134aad",
+		"GOOGLE_SEARCH_API_KEY": "AIzaSyBsILHJDlL-femLtNM4sZhSHsoHEv6OrC0"
 	}
 	/**
 	 * Note: Use secrets to store sensitive data.

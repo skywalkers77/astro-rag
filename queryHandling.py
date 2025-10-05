@@ -41,10 +41,26 @@ vectorstore = CloudflareVectorize(
     index_name=CF_INDEX_NAME,
     embedding=embeddings
 )
+retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+# db_tool = Tool(
+#     name="vector_db",
+#     func=lambda q: vectorstore.similarity_search_with_score(q, top_k=5),  # from earlier code
+#     description="Use this to find answers from the private document database."
+# )
+
+def db_query_tool(query: str, top_k: int =5):
+    results  = vectorstore.similarity_search_with_score(query, k=top_k) # [(Document, score)]
+    formatted_results = [{"doc_id": doc.metadata.get("id",f"unknown_{i}"), "score": round(score,3),"source": doc.metadata.get("source","unknown"),"snippet":doc.page_content[:300]+"..."} for i, (doc, score) in enumerate(results, start=1)]
+    return formatted_results
+
 db_tool = Tool(
     name="vector_db",
-    func=lambda q: vectorstore.similarity_search_with_score(q, top_k=5),  # from earlier code
-    description="Use this to find answers from the private document database."
+    func=db_query_tool,
+    description=(
+        "Use this tool to search private documents. "
+        "It returns JSON with doc_id, source, score, and snippet. "
+        "When answering, you MUST cite doc_id(s) you used."
+    )
 )
 
 search = GoogleSearchAPIWrapper()
@@ -98,10 +114,11 @@ information to answer the question, reply exactly: "NOT_IN_DB". Provide a short 
 """
 
 SYSTEM_PROMPT_HYBRID = """
-You are an assistant that SHOULD PRIORITIZE the provided vector_db when answering.
+You are an assistant that SHOULD PRIORITIZE the provided vector_db tool when answering.
 You MAY use external knowledge and the google_search to help if the vector_db doesn't fully answer the question,
-Rephrase the user’s query if needed before calling google_search. but prefer the vector_db content. When using vector_db content, 
-explicitly cite the doc ids and scores.If the vector_db is sufficient, do not add external facts unless they are directly relevant.
+- Rephrase the user’s query if needed before calling google_search, but give priority to the vector_db results. 
+- When using vector_db content, you MUST cite the doc id(s).
+-If the vector_db is sufficient, do not add external facts unless they are directly relevant.
 """
 
 # -------------------------
@@ -163,7 +180,7 @@ def answer_query(query: str, mode: str = "db-only", top_k: int = 8, score_thresh
             verbose=True
         )
         answer = agent.run(query)
-        return answer, {"provenance": provenance, "raw": raw}
+        return answer
         
 
     else:
