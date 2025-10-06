@@ -52,8 +52,8 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
 	"vars": {
-		"GOOGLE_API_KEY": "AIzaSyDM_9VdhauXGqY1IPSR41w3Ykk8-zTqEnM",
-		"GEMINI_API_KEY": "AIzaSyCZaDvrxxQKrUV1Rme2uAW92s4tWqWoZxk",
+		"GOOGLE_API_KEY": "AIzaSyADCoLmsT2VlC5U1UCWtFwEFrh9p8YmlSc",
+		"GEMINI_API_KEY": "AIzaSyADCoLmsT2VlC5U1UCWtFwEFrh9p8YmlSc",
 		"GOOGLE_CSE_ID": "f566c18b235134aad",
 		"GOOGLE_SEARCH_API_KEY": "AIzaSyBsILHJDlL-femLtNM4sZhSHsoHEv6OrC0"
 	}
