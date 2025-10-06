@@ -126,7 +126,7 @@ GET /images?filename=doc.pdf  # Get image descriptions
 pnpm install
 
 # Deploy to Cloudflare Workers
-pnpm run deploy
+npx wrangler deploy
 
 # Development server
 pnpm run dev
