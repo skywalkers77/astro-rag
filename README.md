@@ -164,7 +164,7 @@ pnpm run dev
 - Falls back to web search when database results are insufficient
 - Provides comprehensive answers with multiple sources
 
-## 📊 Performance Features
+## Performance Features
 
 - **Smart Chunking**: 8K character chunks optimize for LLM context windows
 - **Overlap Strategy**: 500 character overlap maintains context continuity
@@ -172,7 +172,7 @@ pnpm run dev
 - **Batch Processing**: Efficient embedding generation and storage
 - **Error Handling**: Graceful fallbacks for PDF processing failures
 
-## 🛠️ Development
+## Development
 
 ### Project Structure
 ```
@@ -195,7 +195,7 @@ pnpm test
 pnpm run dev
 ```
 
-## 🔍 Use Cases
+## Use Cases
 
 - **NASA Research**: Process and query scientific publications and research papers
 - **Space Documentation**: Create searchable knowledge bases for space missions
@@ -204,7 +204,7 @@ pnpm run dev
 - **Enterprise Search**: Enable semantic search across technical documentation
 - **Research Collaboration**: Facilitate knowledge sharing in scientific communities
 
-## 📈 Monitoring
+##  Monitoring
 
 The system includes comprehensive logging and monitoring:
 - Chunk processing statistics
